@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Socket.IO Voice Server for Frontend Integration
+Socket.IO Text Server for Frontend Integration
 Works with Next.js frontend using socket.io-client
 """
 
@@ -8,7 +8,7 @@ import socketio
 import logging
 import asyncio
 from aiohttp import web
-from voice_chatbot import VoiceChatbot
+from text_chatbot import TextChatbot
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,9 +34,8 @@ async def connect(sid, environ):
     
     try:
         # Create individual session for this client
-        chatbot = VoiceChatbot()
-        session_id = chatbot.rag_orchestrator.create_session()
-        chatbot.session_id = session_id
+        chatbot = TextChatbot()
+        session_id = chatbot.create_session()
         
         clients[sid] = {
             'chatbot': chatbot,
@@ -46,7 +45,7 @@ async def connect(sid, environ):
         # Send simple greeting (no session ID)
         await sio.emit('message', {
             'type': 'connected',
-            'data': 'Hello! I\'m ready to help you. Start speaking anytime!'
+            'data': 'Hello! I\'m ready to help you. Start typing anytime!'
         }, room=sid)
         
         logger.info(f"✅ Session {session_id} created for client {sid}")
@@ -96,7 +95,7 @@ async def query(sid, data):
         chatbot = client_data['chatbot']
         session_id = client_data['session_id']
         
-        logger.info(f"🗣️ Client {sid} | Session {session_id}: '{query_text}'")
+        logger.info(f"� Client {sid} | Session {session_id}: '{query_text}'")
         
         # Send status update
         await sio.emit('message', {
@@ -104,55 +103,88 @@ async def query(sid, data):
             'data': f'Processing: {query_text}'
         }, room=sid)
         
-        # Collect responses
-        responses = []
-        
-        # Override speak_text to capture responses
-        original_speak = chatbot.speak_text
-        
-        def capture_speak(text):
-            # Just collect responses, we'll send them later
-            responses.append(text)
-            logger.info(f"📝 Captured response: {text[:50]}...")
-        
-        chatbot.speak_text = capture_speak
-        
         try:
-            # Process query in background
-            logger.info(f"🔄 Processing with session {session_id}...")
+            # Process query using text_chatbot method
+            logger.info(f"🔄 Processing text query with session {session_id}...")
             
             # Run in executor to avoid blocking
             loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(
+            response = await loop.run_in_executor(
                 None,
-                chatbot.process_voice_query,
+                chatbot.process_text_query,
                 query_text
             )
             
-            # Give extra time for background threads
-            await asyncio.sleep(1)
+            logger.info(f"✅ Client {sid} processing completed")
             
-            logger.info(f"✅ Client {sid} processing completed with {len(responses)} responses")
-            
-            # Send all collected responses
-            for response_text in responses:
+            # Handle different response types
+            if response:
+                response_text = response.get('response', '')
+                response_type = response.get('response_type', 'unknown')
+                should_continue = response.get('should_continue', True)
+                
+                if response_text:
+                    # Send the main response
+                    await sio.emit('message', {
+                        'type': 'response',
+                        'data': response_text
+                    }, room=sid)
+                    logger.info(f"� Sent to client {sid}: {response_text[:50]}...")
+                
+                # If there's a detailed response (for intermediate responses)
+                if response.get('has_detailed_response') and response_type == 'intermediate':
+                    # Check if detailed response is already available
+                    detailed_response = response.get('detailed_response')
+                    if detailed_response:
+                        await sio.emit('message', {
+                            'type': 'response',
+                            'data': detailed_response
+                        }, room=sid)
+                        logger.info(f"� Sent detailed response to client {sid}: {detailed_response[:50]}...")
+                    else:
+                        # Get detailed response asynchronously
+                        try:
+                            detailed_resp = await loop.run_in_executor(
+                                None,
+                                chatbot.get_detailed_response,
+                                query_text
+                            )
+                            if detailed_resp and detailed_resp.get('response'):
+                                await sio.emit('message', {
+                                    'type': 'response',
+                                    'data': detailed_resp['response']
+                                }, room=sid)
+                                logger.info(f"📤 Sent delayed detailed response to client {sid}: {detailed_resp['response'][:50]}...")
+                        except Exception as e:
+                            logger.error(f"Error getting detailed response for {sid}: {e}")
+                
+                # Send completion status
+                if should_continue:
+                    await sio.emit('message', {
+                        'type': 'status',
+                        'data': '✅ Completed - Ready for next question'
+                    }, room=sid)
+                else:
+                    # User indicated end of conversation
+                    await sio.emit('message', {
+                        'type': 'status',
+                        'data': '👋 Conversation ended'
+                    }, room=sid)
+            else:
                 await sio.emit('message', {
-                    'type': 'response',
-                    'data': response_text
+                    'type': 'error',
+                    'data': 'No response received'
                 }, room=sid)
-                logger.info(f"🔊 Sent to client {sid}: {response_text[:50]}...")
             
+        except Exception as e:
+            logger.error(f"Error processing text query for {sid}: {e}")
             await sio.emit('message', {
-                'type': 'status',
-                'data': f'✅ Completed - Ready for next question'
+                'type': 'error',
+                'data': f'Processing error: {str(e)}'
             }, room=sid)
             
-        finally:
-            # Restore original speak
-            chatbot.speak_text = original_speak
-            
     except Exception as e:
-        logger.error(f"Error processing query for {sid}: {e}")
+        logger.error(f"Error handling query for {sid}: {e}")
         await sio.emit('message', {
             'type': 'error',
             'data': str(e)
@@ -169,9 +201,10 @@ app.router.add_get('/health', health)
 
 def main():
     """Start the Socket.IO server"""
-    logger.info("🚀 Starting Socket.IO Server on http://localhost:8889")
+    logger.info("🚀 Starting Socket.IO Text Server on http://localhost:8889")
     logger.info("👥 Each client gets their own session")
     logger.info("🗑️ Sessions expire when clients disconnect")
+    logger.info("💬 Optimized for text-based interactions")
     logger.info("🌐 CORS enabled for frontend integration")
     logger.info("-" * 50)
     
