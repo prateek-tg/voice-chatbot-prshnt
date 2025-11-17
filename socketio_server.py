@@ -28,9 +28,11 @@ sio.attach(app)
 clients = {}
 
 @sio.event
-async def connect(sid, environ):
-    """Handle client connection"""
+async def connect(sid, environ, auth=None):
+    """Handle client connection with optional auth data"""
     logger.info(f"🔗 Client {sid} connected")
+    if auth:
+        logger.info(f"📋 Connection data: {auth}")
     
     try:
         # Create individual session for this client
@@ -51,10 +53,18 @@ async def connect(sid, environ):
         logger.info(f"✅ Session {session_id} created for client {sid}")
         
     except Exception as e:
+        error_message = str(e)
         logger.error(f"Error creating session for {sid}: {e}")
+        
+        # Provide helpful error message for common issues
+        if "Could not connect to tenant" in error_message or "default_tenant" in error_message:
+            helpful_message = "Server database not initialized. Please contact the administrator to run: python3 initialize_data.py --reset"
+        else:
+            helpful_message = f'Failed to create session: {error_message}'
+        
         await sio.emit('message', {
             'type': 'error',
-            'data': f'Failed to create session: {str(e)}'
+            'data': helpful_message
         }, room=sid)
 
 @sio.event
@@ -208,7 +218,7 @@ def main():
     logger.info("🌐 CORS enabled for frontend integration")
     logger.info("-" * 50)
     
-    web.run_app(app, host='0.0.0.0', port=8889)
+    web.run_app(app, host='localhost', port=8889)
     # web.run_app(app, host='0.0.0.0', port=8889)
 
 if __name__ == "__main__":
